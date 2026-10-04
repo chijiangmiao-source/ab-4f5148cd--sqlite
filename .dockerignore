@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.git/
+.gitignore
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.tox/
+.nox/
+*.db
+*.sqlite

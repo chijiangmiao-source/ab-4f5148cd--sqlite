@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>星载归档快照 · B-tree 页面归属审查</title>
+<style>
+  :root {
+    --bg: #0e1420; --panel: #161e2e; --panel2: #1d273b;
+    --ink: #dce6f5; --muted: #8ea0bd; --line: #2a3852;
+    --ok: #2fbf71; --bad: #e0566b; --warn: #e0a93f; --accent: #6aa6ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 14px/1.55 "Segoe UI", "PingFang SC", "Microsoft YaHei", monospace, sans-serif;
+  }
+  header {
+    padding: 18px 28px; border-bottom: 1px solid var(--line);
+    background: linear-gradient(180deg, #121a2a, #0e1420);
+  }
+  header h1 { margin: 0; font-size: 18px; letter-spacing: .5px; }
+  header p { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
+  main { max-width: 1180px; margin: 0 auto; padding: 22px 28px 60px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 18px 20px; margin-bottom: 18px;
+  }
+  .card h2 { margin: 0 0 12px; font-size: 15px; color: var(--accent); }
+  label { display: block; color: var(--muted); margin: 10px 0 4px; font-size: 12px; }
+  textarea, input[type=number], input[type=text] {
+    width: 100%; background: var(--panel2); color: var(--ink);
+    border: 1px solid var(--line); border-radius: 6px; padding: 9px 11px;
+    font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px;
+  }
+  textarea { min-height: 110px; resize: vertical; word-break: break-all; }
+  input[type=number] { width: 160px; }
+  button {
+    margin-top: 14px; background: var(--accent); color: #08111f;
+    border: 0; border-radius: 6px; padding: 10px 22px; font-weight: 700;
+    cursor: pointer; font-size: 13px;
+  }
+  button:disabled { opacity: .55; cursor: wait; }
+  .row { display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-end; }
+  .verdict {
+    border-radius: 10px; padding: 16px 20px; margin-bottom: 18px;
+    border: 1px solid var(--line); font-weight: 700; font-size: 16px;
+    display: flex; align-items: center; gap: 12px;
+  }
+  .verdict.ok  { background: rgba(47,191,113,.12); border-color: var(--ok); color: var(--ok); }
+  .verdict.bad { background: rgba(224,86,107,.12); border-color: var(--bad); color: var(--bad); }
+  .pill {
+    display: inline-block; padding: 1px 9px; border-radius: 999px;
+    font-size: 11px; font-weight: 700; border: 1px solid var(--line);
+  }
+  .role-table-interior { color: #8ec7ff; border-color: #2f5d8f; }
+  .role-table-leaf     { color: #7fd6a2; border-color: #2f7a55; }
+  .role-overflow       { color: #d3a86e; border-color: #8f6a2f; }
+  .role-free-trunk     { color: #d77ce0; border-color: #7f2f8f; }
+  .role-free-leaf      { color: #b787dd; border-color: #66407f; }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th, td { border-bottom: 1px solid var(--line); padding: 7px 9px; text-align: left;
+           vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background: var(--panel); }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .mono { font-family: ui-monospace, Menlo, Consolas, monospace; }
+  .kv { display: grid; grid-template-columns: 180px 1fr; gap: 4px 14px; font-size: 13px; }
+  .kv div:nth-child(odd) { color: var(--muted); }
+  .violation-box {
+    background: rgba(224,86,107,.08); border: 1px solid var(--bad);
+    border-radius: 8px; padding: 14px 16px;
+  }
+  .violation-box code { color: #ffd7dd; font-size: 13px; }
+  .muted { color: var(--muted); }
+  .scroll { overflow-x: auto; max-height: 520px; overflow-y: auto; }
+  .chain { margin: 4px 0; }
+  .chain b { color: var(--warn); }
+  .arrow { color: var(--muted); margin: 0 6px; }
+  .err { color: var(--bad); font-size: 12.5px; }
+  .ok-note { color: var(--ok); }
+  .badge-raw {
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    background: #0b1120; border: 1px solid var(--line); border-radius: 4px;
+    padding: 0 6px;
+  }
+  .hidden { display: none; }
+  .hint { font-size: 11.5px; color: var(--muted); margin-top: 6px; }
+  .filebtn {
+    background: var(--panel2); color: var(--ink); border: 1px solid var(--line);
+    font-weight: 500; padding: 9px 14px;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>星载归档库 · 维护快照导入前审查</h1>
+  <p>校验指定表根下的 B-tree 页面、溢出负载与空闲链互不共用页面；仅接受 SQLite 3 / 页大小 512–4096 / 无保留字节 / 非自动清理 的快照。</p>
+</header>
+<main>
+  <section class="card">
+    <h2>提交快照</h2>
+    <div class="row">
+      <div>
+        <label for="root">表根页号 root_page</label>
+        <input id="root" type="number" min="1" value="2" placeholder="例如 2">
+      </div>
+      <div>
+        <label>&nbsp;</label>
+        <input id="file" type="file" accept=".db,.sqlite,.sl2,application/octet-stream" class="hidden">
+        <button type="button" class="filebtn" id="pick">选择快照文件（自动 Base64）</button>
+      </div>
+      <div style="flex:1; min-width:220px">
+        <label for="b64">或直接粘贴 Base64（上限 512 KiB 原始字节）</label>
+        <input id="b64" type="text" placeholder="U1FMaXRlIGZvcm1hdCAzAA== ...">
+      </div>
+    </div>
+    <label for="b64big">Base64 文本区（长内容）</label>
+    <textarea id="b64big" placeholder="也可以把 Base64 粘贴在这里"></textarea>
+    <div class="hint" id="sizehint"></div>
+    <button id="go">提交审查</button>
+    <span class="err" id="formerr"></span>
+  </section>
+
+  <div id="ssr-root">__INITIAL_SUMMARY__</div>
+  <div id="result" class="hidden"></div>
+  <script id="initial-submission" type="application/json">__INITIAL_SUBMISSION__</script>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g,
+    (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+function hexByte(v) {
+  if (v === null || v === undefined) return "—";
+  return "0x" + Number(v).toString(16).toUpperCase().padStart(2, "0");
+}
+function loc(p, o) {
+  if (!p) return "文件头";
+  return "page " + p + (o !== null && o !== undefined && o >= 0 ? " offset " + o : "");
+}
+function rolePill(role) {
+  return '<span class="pill role-' + esc(role) + '">' + esc(role) + "</span>";
+}
+
+$("pick").addEventListener("click", () => $("file").click());
+$("file").addEventListener("change", () => {
+  const f = $("file").files[0];
+  if (!f) return;
+  if (f.size > 512 * 1024) {
+    $("formerr").textContent = "文件超过 512 KiB，拒绝读取。";
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = () => {
+    const s = String(reader.result).split(",")[1] || "";
+    $("b64big").value = s;
+    $("b64").value = "";
+    $("sizehint").textContent = "已载入文件：" + f.name + "（" + f.size + " 字节）";
+  };
+  reader.readAsDataURL(f);
+});
+
+$("go").addEventListener("click", submitCurrent);
+async function submitCurrent() {
+  $("formerr").textContent = "";
+  const b64 = ($("b64big").value || $("b64").value).trim().replace(/\s+/g, "");
+  const root = parseInt($("root").value, 10);
+  if (!b64) { $("formerr").textContent = "请提供 Base64 快照。"; return; }
+  if (!Number.isInteger(root) || root < 1) {
+    $("formerr").textContent = "root_page 必须是 ≥1 的整数。"; return;
+  }
+  const btn = $("go"); btn.disabled = true; btn.textContent = "审查中…";
+  try {
+    const resp = await fetch("/api/verify", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({snapshot: b64, root_page: root}),
+    });
+    const data = await resp.json();
+    if (data.error) {
+      renderRequestError(data.error, resp.status);
+    } else {
+      renderReport(data);
+      history.replaceState(null, "", "/view/" + data.submission_id);
+    }
+  } catch (e) {
+    $("formerr").textContent = "请求失败：" + e;
+  } finally {
+    btn.disabled = false; btn.textContent = "提交审查";
+  }
+}
+
+function renderRequestError(err, status) {
+  $("result").classList.remove("hidden");
+  $("result").innerHTML =
+    '<div class="verdict bad">✗ 请求被拒绝（HTTP ' + status + "）</div>" +
+    '<section class="card"><div class="violation-box mono">' +
+    "<div><b>" + esc(err.code) + "</b></div>" +
+    "<div>" + esc(err.message) + "</div></div></section>";
+}
+
+function renderReport(sub) {
+  const ssr = $("ssr-root");
+  if (ssr) ssr.remove();
+  const r = sub.report;
+  const v = r.first_violation;
+  const banner = r.accepted
+    ? '<div class="verdict ok">✓ ACCEPTED — 页面归属唯一，溢出链与空闲链校验通过</div>'
+    : '<div class="verdict bad">✗ REJECTED — ' + esc(v.code) +
+      ' @ ' + esc(loc(v.page, v.offset)) + "</div>";
+
+  let html = banner;
+
+  if (!r.accepted) {
+    html += '<section class="card"><h2>首个违规证据（清除旧的成功结论）</h2>' +
+      '<div class="violation-box mono">' +
+      '<div><code>' + esc(v.code) + "</code></div>" +
+      "<div>" + esc(v.message) + "</div>" +
+      '<div class="muted">定位：page <b>' + esc(v.page) + "</b>" +
+      " · offset <b>" + esc(v.offset) + "</b> · " + esc(v.location) + "</div>" +
+      '<div class="muted">首个原始字节：<span class="badge-raw">' +
+      esc(hexByte(v.raw_byte)) + "</span></div>" +
+      "</div></section>";
+  }
+
+  // Summary
+  const rng = r.row_key_range ? r.row_key_range[0] + " … " + r.row_key_range[1] : "—";
+  html += '<section class="card"><h2>裁决总览</h2><div class="kv">' +
+    kv("提交编号", esc(sub.submission_id)) +
+    kv("快照字节数", esc(sub.snapshot_bytes)) +
+    kv("页大小 / 页数", esc(r.page_size) + " / " + esc(r.page_count)) +
+    kv("表根页", esc(r.root_page)) +
+    kv("行键范围 (rowid min…max)", '<span class="mono">' + esc(rng) + "</span>") +
+    kv("溢出链数量", esc(r.overflow_chains.length)) +
+    kv("空闲干链 / 空闲叶页", esc(r.free_trunk_chain.length) + " / " + esc(r.free_leaf_pages.length)) +
+    "</div>";
+  html += '<h2 style="margin-top:16px">已执行的约束</h2><ul class="mono" style="margin:0">';
+  for (const c of r.checked_constraints) html += "<li>" + esc(c) + "</li>";
+  html += "</ul></section>";
+
+  // Pages
+  html += '<section class="card"><h2>逐页归属与引用来源（' +
+    r.pages.length + ' 个已归属页面）</h2><div class="scroll"><table>' +
+    "<tr><th class='num'>页号</th><th>归属角色</th><th>说明</th>" +
+    "<th>引用来源页</th><th>引用位置</th><th class='num'>首个原始字节</th>" +
+    "<th>行键 / 分隔键</th><th>单元细节</th></tr>";
+  for (const p of r.pages) {
+    let cells = "";
+    if (p.cells && p.cells.length) {
+      cells = p.cells.slice(0, 4).map((c) =>
+        "rowid " + c.rowid + " (payload " + c.payload_length +
+        " = local " + c.local_bytes + " + overflow " + c.overflow_bytes +
+        (c.first_overflow_page ? " → page " + c.first_overflow_page : "") + ")").join("<br>");
+      if (p.cells.length > 4) cells += "<br>… 共 " + p.cells.length + " 个单元";
+    }
+    html += "<tr>" +
+      '<td class="num mono">#' + esc(p.page) + "</td>" +
+      "<td>" + rolePill(p.owner_role) + "</td>" +
+      "<td>" + esc(p.detail) + "</td>" +
+      '<td class="mono">' + (p.referenced_by.length ? esc(p.referenced_by.join(", ")) : "—（根/文件头）") + "</td>" +
+      '<td class="mono">' + esc(p.reference_location || "—") + "</td>" +
+      '<td class="num"><span class="badge-raw">' + esc(hexByte(p.raw_byte)) + "</span></td>" +
+      '<td class="mono">' + esc((p.row_keys || []).slice(0, 8).join(", ") +
+        ((p.row_keys || []).length > 8 ? " …" : "")) + "</td>" +
+      '<td class="mono" style="color:var(--muted)">' + (cells || "—") + "</td>" +
+      "</tr>";
+  }
+  html += "</table></div></section>";
+
+  // Subtree ranges
+  html += '<section class="card"><h2>子树行键范围</h2><div class="scroll"><table>' +
+    "<tr><th class='num'>页号</th><th class='num'>rowid 最小</th>" +
+    "<th class='num'>rowid 最大</th></tr>";
+  for (const s of r.subtree_ranges) {
+    html += "<tr><td class='num mono'>#" + esc(s.page) +
+      "</td><td class='num mono'>" + esc(s.rowid_min) +
+      "</td><td class='num mono'>" + esc(s.rowid_max) + "</td></tr>";
+  }
+  html += "</table></div></section>";
+
+  // Overflow chains
+  html += '<section class="card"><h2>溢出链（恰好覆盖声明负载）</h2>';
+  if (!r.overflow_chains.length) {
+    html += '<p class="muted">无溢出页。</p>';
+  } else {
+    r.overflow_chains.forEach((chain, i) => {
+      html += '<div class="chain mono">链 ' + (i + 1) + "：" +
+        chain.map((p) => "<b>" + esc(p) + "</b>").join('<span class="arrow">→</span>') +
+        ' <span class="muted">（' + chain.length + " 页）</span></div>";
+    });
+  }
+  html += "</section>";
+
+  // Free list
+  html += '<section class="card"><h2>空闲页干链</h2>' +
+    '<div class="mono">trunk: ' +
+    (r.free_trunk_chain.length ? r.free_trunk_chain.map((p) => esc("#" + p)).join(" → ") : "—") +
+    "<br>leaf: " +
+    (r.free_leaf_pages.length ? r.free_leaf_pages.map((p) => esc("#" + p)).join(", ") : "—") +
+    "</div></section>";
+
+  $("result").classList.remove("hidden");
+  $("result").innerHTML = html;
+}
+
+function kv(k, v) { return "<div>" + k + "</div><div>" + v + "</div>"; }
+
+async function loadFromUrl() {
+  const embedded = document.getElementById("initial-submission");
+  if (embedded && embedded.textContent.trim() &&
+      embedded.textContent.trim() !== "__INITIAL_SUBMISSION__") {
+    try {
+      const data = JSON.parse(embedded.textContent);
+      if (data && data.report) { renderReport(data); return; }
+    } catch (e) { /* fall through to fetch */ }
+  }
+  const m = location.pathname.match(/^\/view\/([a-f0-9]+)/);
+  if (!m) return;
+  const resp = await fetch("/api/submission/" + m[1]);
+  if (!resp.ok) return;
+  const data = await resp.json();
+  if (data && data.report) renderReport(data);
+}
+loadFromUrl();
+</script>
+</body>
+</html>
