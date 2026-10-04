@@ -1,0 +1,36 @@
+services:
+  web:
+    build: .
+    image: archive-snapshot-audit:latest
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request, sys;
+          r = urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2);
+          sys.exit(0 if r.status == 200 else 1)
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  # One-shot verification: image build already ran the unit tests as a build
+  # check; this service re-runs them, then smokes the live HTTP API and exits.
+  # `docker compose up --build --exit-code-from verify --abort-on-container-exit`
+  # reports the result through the verify container's exit code.
+  verify:
+    build: .
+    image: archive-snapshot-audit:latest
+    depends_on:
+      web:
+        condition: service_healthy
+    environment:
+      AUDIT_BASE_URL: http://web:8080
+    command:
+      - sh
+      - -c
+      - python -m unittest discover -v && python scripts/smoke.py
